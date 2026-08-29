@@ -1,24 +1,50 @@
 # analyze.py
-# Make KM-Waechter smarter. The 80% rule only warns you once a car is nearly worn. Here you find
-# which cars are most likely to break down SOON, from their history, and rank them by risk, so the
-# fleet team fixes the risky ones first.
-#
-# fleet_history.csv has one row per car (120 of them) and a "broke_down" column (1 = it later
-# broke down).
-#
-# TODO(you), with IBM Bob and pandas:
-#   1. Load fleet_history.csv.
-#   2. Find which columns actually separate the cars that broke down from those that did not.
-#      Do not assume. Compare the two groups column by column and let the numbers answer.
-#      (Total mileage and age look like the obvious answers. Check whether they really are.)
-#   3. Build a simple risk score from 0 to 100 for each car, from the columns that DO separate.
-#      No heavy machine learning needed.
-#   4. Print the cars ranked by risk, highest first.
-#   5. Write a two-line summary at the top of this file: which factors matter most, and why.
+# Make KM-Waechter smarter — rank cars by breakdown risk instead of waiting
+# for the 80% wear rule to catch them.
 
-import pandas as pd
+try:
+    import pandas as pd  # type: ignore[import-not-found]
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "This script requires pandas. Install it with: pip install pandas"
+    ) from exc
 
 df = pd.read_csv("fleet_history.csv")
-print(df.head())
 
-# your analysis here
+FEATURES = ["odometer_km", "km_since_service", "avg_daily_km", "load_factor", "age_years"]
+
+broke = df[df["broke_down"] == 1]
+ok = df[df["broke_down"] == 0]
+
+print("Column-by-column comparison (broke-down vs healthy cars):")
+print(f"{'column':<18}{'broke mean':>12}{'healthy mean':>15}{'separation':>13}")
+separation = {}
+for col in FEATURES:
+    m_broke, m_ok = broke[col].mean(), ok[col].mean()
+    spread = ok[col].std() or 1e-9
+    gap = (m_broke - m_ok) / spread  # how many "healthy std devs" apart the means are
+    separation[col] = gap
+    print(f"{col:<18}{m_broke:>12.1f}{m_ok:>15.1f}{gap:>13.2f}")
+
+# Keep only columns with a real gap between the two groups.
+predictive = {c: g for c, g in separation.items() if abs(g) >= 0.5}
+print("\nColumns that actually separate broke-down cars from healthy ones:", list(predictive))
+
+
+def normalize(series):
+    lo, hi = series.min(), series.max()
+    return (series - lo) / (hi - lo) if hi != lo else series * 0
+
+
+df["risk_score"] = 0.0
+weight_total = sum(abs(g) for g in predictive.values()) or 1.0
+for col, gap in predictive.items():
+    norm = normalize(df[col])
+    if gap < 0:
+        norm = 1 - norm  # a LOWER value of this column means HIGHER risk
+    df["risk_score"] += norm * (abs(gap) / weight_total)
+df["risk_score"] = (df["risk_score"] * 100).round(1)
+
+ranked = df.sort_values("risk_score", ascending=False)
+print("\nCars ranked by breakdown risk (highest first):")
+print(ranked[["car_id", "risk_score", "broke_down"] + FEATURES].to_string(index=False))
